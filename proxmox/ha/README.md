@@ -45,15 +45,37 @@ nodes/<ノード名>.yaml       # ノードごと: ホスト名, 静的 IP
 _out/                      # 生成物（gitignore 対象・秘密鍵を含む）
 ```
 
-`gen config` で役割ごとの共通設定（`controlplane.yaml` / `worker.yaml`）を作り、そこに `talosctl machineconfig patch` でノードごとのパッチを当てて `_out/<ノード名>.yaml` を作る。ノードを増やすときは `nodes/` にファイルを足し、`gen-config.sh` のノード一覧に追加する。
+`gen config` で役割ごとの共通設定（`controlplane.yaml` / `worker.yaml`）を作り、そこに `talosctl machineconfig patch` でノードごとのパッチを当てて `_out/<ノード名>.yaml` を作る。
 
-`talosconfig` の接続先は VIP ではなく CP 3 台の実 IP にしている。VIP は etcd が正常なときしか動かないため、障害時に Talos API へ入れなくなるのを避けるため。
+ノードの一覧と役割は `nodes/` のファイル名で決まる（`ctrl*.yaml` は controlplane、`worker*.yaml` は worker）。ノードを増やすときは `nodes/` にファイルを足すだけでよい。
+
+`talosconfig` の接続先は VIP ではなく CP の実 IP にしている。VIP は etcd が正常なときしか動かないため、障害時に Talos API へ入れなくなるのを避けるため。接続先の IP は `nodes/ctrl*.yaml` から読み取る。
+
+`_out/secrets.yaml` はクラスタの CA と鍵そのもの。リポジトリ外にバックアップしておく。`gen-config.sh` は `secrets.yaml` がないと新しく作るため、失ったまま実行すると、既存のクラスタを管理できない設定ができてしまう。
 
 ## 構築手順
 
-`talosctl` は v1.14.x を使う。コマンドはこのディレクトリで実行する。
+`talosctl` は v1.14.6 を使う。インストールされる Talos のバージョンは ISO（1.14.5）ではなく、手元の `talosctl` のバージョンで決まる（インストーラーのイメージがそのバージョンになる）。コマンドはこのディレクトリで実行する。
+
+固定 IP（`.110`〜`.122`）はルーターの DHCP の払い出し範囲に入っている（[既知の問題](#固定-ip-がルーターの-dhcp-の払い出し範囲に入っている)）。構築を始める前に、これらの IP、特に VIP の `.110` が使われていないことを確認する。
 
 ### 1. VM の作成
+
+#### ctrl01（stand-alone 構成の VM を使い回す場合）
+
+[stand-alone](../stand-alone/) のクラスタを消して、メンテナンスモードに戻す。stand-alone のクラスタはここで消える。
+
+```bash
+talosctl --talosconfig ../stand-alone/_out/talosconfig -n 192.168.1.111 -e 192.168.1.111 \
+  reset --graceful=false --reboot \
+  --system-labels-to-wipe STATE --system-labels-to-wipe EPHEMERAL
+```
+
+インストール済みの Talos がディスクから起動し、設定がないのでメンテナンスモードになる（ISO は不要）。IP は DHCP で付く。
+
+新しく VM を作る場合は、下の `qm create` のループに `"100 talos-linux-ctrl01 20"` を足す。
+
+#### ctrl02 以降
 
 Proxmox のシェルで実行する。ISO は `local:iso/talos-linux-1.14.5.iso` を使う。
 
@@ -74,12 +96,24 @@ done
 
 ```bash
 # Proxmox で MAC を確認する
-for id in 101 102 111 112; do echo "$id $(qm config $id | grep -oP 'virtio=\K[^,]+')"; done
-
-# 手元でサブネットに ping を打ってから ARP テーブルを見る
-for i in $(seq 1 254); do ping -c1 -t1 192.168.1.$i >/dev/null 2>&1 & done; wait
-arp -an | grep -i bc:24:11
+for id in 100 101 102 111 112; do echo "$id $(qm config $id | grep -oP 'virtio=\K[^,]+')"; done
 ```
+
+macOS の `arp` は MAC を小文字で、各オクテットの先頭の 0 を省いて表示する（`BC:24:11:02:2A:03` は `bc:24:11:2:2a:3`）。次のように書式を揃えてから照合する。
+
+```bash
+# 手元でサブネットに ping を打って ARP テーブルを埋める
+for i in $(seq 1 254); do ping -c1 -t1 192.168.1.$i >/dev/null 2>&1 & done; wait
+
+# Proxmox で確認した MAC から仮の IP を引く
+mac2ip() {
+  local m=$(echo "$1" | tr 'A-Z' 'a-z' | sed -E 's/(^|:)0([0-9a-f])/\1\2/g')
+  arp -an | grep " at $m " | grep -oE '\([0-9.]+\)' | tr -d '()'
+}
+mac2ip BC:24:11:02:2A:03
+```
+
+ARP テーブルには古いエントリが残るため、1 つの MAC に複数の IP が出ることがある。そのときは `talosctl -n <IP> -e <IP> get disks --insecure` に応答する IP がメンテナンスモードのもの。
 
 ### 2. 設定ファイルの生成
 
