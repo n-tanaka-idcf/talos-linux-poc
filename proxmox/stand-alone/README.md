@@ -9,6 +9,18 @@ Proxmox VE の VM 1 台で Talos Linux のコントロールプレーンを動�
 
 ## 構成
 
+```mermaid
+flowchart TB
+    client["作業端末<br/>kubectl / talosctl"]
+
+    subgraph pve["Proxmox VE (pve / 192.168.1.101) - vmbr0"]
+        ctrl01["talos-linux-ctrl01<br/>VMID 100 / 192.168.1.111<br/>control-plane + workload"]
+    end
+
+    client -- "kubectl :6443" --> ctrl01
+    client -. "talosctl :50000" .-> ctrl01
+```
+
 | 項目 | 値 |
 |---|---|
 | Proxmox ホスト | `192.168.1.101`（ノード名 `pve`） |

@@ -6,14 +6,29 @@ Proxmox ホストは 1 台なので、物理ホストの障害には耐えられ
 
 ## 構成
 
-```
-                 VIP 192.168.1.110:6443  (Layer2VIPConfig)
-                          │
-      ┌───────────────────┼───────────────────┐
-  ctrl01 .111         ctrl02 .112         ctrl03 .113      ← etcd 3 台
-      └───────────────────┼───────────────────┘
-                ┌─────────┴─────────┐
-           worker01 .121       worker02 .122
+```mermaid
+flowchart TB
+    client["作業端末<br/>kubectl / talosctl"]
+
+    subgraph pve["Proxmox VE (pve / 192.168.1.101) - vmbr0"]
+        vip(["VIP 192.168.1.110:6443<br/>Layer2VIPConfig"])
+
+        subgraph cp["Control Plane (etcd ×3)"]
+            ctrl01["talos-linux-ctrl01<br/>VMID 100 / .111"]
+            ctrl02["talos-linux-ctrl02<br/>VMID 101 / .112"]
+            ctrl03["talos-linux-ctrl03<br/>VMID 102 / .113"]
+        end
+
+        subgraph wk["Workers"]
+            worker01["talos-linux-worker01<br/>VMID 111 / .121"]
+            worker02["talos-linux-worker02<br/>VMID 112 / .122"]
+        end
+    end
+
+    client -- "kubectl :6443" --> vip
+    client -. "talosctl :50000<br/>(CP の実 IP)" .-> cp
+    vip -. "いずれか 1 台が保持" .-> ctrl01 & ctrl02 & ctrl03
+    cp --> wk
 ```
 
 | VMID | 名前 | 役割 | IP | vCPU / RAM / ディスク |
