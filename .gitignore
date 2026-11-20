@@ -1,0 +1,7 @@
+# talosctl gen secrets / gen config の生成物（秘密鍵を含む）
+_out/
+secrets.yaml
+talosconfig
+kubeconfig
+controlplane.yaml
+worker.yaml
