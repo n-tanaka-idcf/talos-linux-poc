@@ -2,7 +2,24 @@
 
 Proxmox VE の VM 1 台で Talos Linux のコントロールプレーンを動かし、そのノードでワークロードも実行する構成。
 
+> [!WARNING]
+> 2026-11-21 以降、この VM（VMID 100 / `192.168.1.111`）は [HA 構成](../ha/) のコントロールプレーン ctrl01 として使っている。このクラスタは残っていない。
+>
+> **この手順をそのまま実行しないこと。** `192.168.1.111` への `apply-config` や `bootstrap` は HA クラスタの ctrl01 に届き、etcd を壊すおそれがある。この構成を作り直す場合は、別の VM と IP を用意して、手順中の VMID・IP・MAC を置き換える。
+
 ## 構成
+
+```mermaid
+flowchart TB
+    client["作業端末<br/>kubectl / talosctl"]
+
+    subgraph pve["Proxmox VE (pve / 192.168.1.101) - vmbr0"]
+        ctrl01["talos-linux-ctrl01<br/>VMID 100 / 192.168.1.111<br/>control-plane + workload"]
+    end
+
+    client -- "kubectl :6443" --> ctrl01
+    client -. "talosctl :50000" .-> ctrl01
+```
 
 | 項目 | 値 |
 |---|---|
