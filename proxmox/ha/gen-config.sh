@@ -28,6 +28,7 @@ talosctl gen config "$CLUSTER_NAME" "$ENDPOINT" \
   --install-disk /dev/sda \
   --config-patch @patches/common.yaml \
   --config-patch-control-plane @patches/controlplane.yaml \
+  --config-patch-control-plane @patches/cilium.yaml \
   --with-docs=false --with-examples=false \
   --force -o _out
 

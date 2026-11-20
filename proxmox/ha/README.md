@@ -45,7 +45,7 @@ flowchart TB
 | エンドポイント | `https://192.168.1.110:6443`（VIP） |
 | GW / DNS | `192.168.1.1` |
 | Talos / Kubernetes | v1.14.6 / v1.37.1 |
-| CNI | Flannel（デフォルト） |
+| CNI | Cilium 1.20.5（kube-proxy を置き換え、Hubble Relay / UI を有効化） |
 | NTP | `ntp.nict.jp` |
 
 ctrl01 は [stand-alone](../stand-alone/) 構成の VM をリセットして使い回しているため、ディスクが 50GB になっている。
@@ -56,7 +56,9 @@ ctrl01 は [stand-alone](../stand-alone/) 構成の VM をリセットして使�
 gen-config.sh              # machine config の生成（secrets.yaml があれば再利用する）
 patches/common.yaml        # 全ノード共通: NTP, DNS
 patches/controlplane.yaml  # CP 共通: Layer2 VIP
+patches/cilium.yaml        # CP 共通: Flannel と kube-proxy の無効化
 nodes/<ノード名>.yaml       # ノードごと: ホスト名, 静的 IP
+cilium/values.yaml         # Cilium の helm values（Talos 向け）
 _out/                      # 生成物（gitignore 対象・秘密鍵を含む）
 ```
 
@@ -70,7 +72,7 @@ _out/                      # 生成物（gitignore 対象・秘密鍵を含む�
 
 ## 構築手順
 
-`talosctl` は v1.14.6 を使う。インストールされる Talos のバージョンは ISO（1.14.5）ではなく、手元の `talosctl` のバージョンで決まる（インストーラーのイメージがそのバージョンになる）。コマンドはこのディレクトリで実行する。
+`talosctl` は v1.14.6 を使う。インストールされる Talos のバージョンは ISO（1.14.5）ではなく、手元の `talosctl` のバージョンで決まる（インストーラーのイメージがそのバージョンになる）。Cilium を入れるために `helm` と `cilium` CLI も使う（`brew install helm cilium-cli`）。コマンドはこのディレクトリで実行する。
 
 固定 IP（`.110`〜`.122`）はルーターの DHCP の払い出し範囲に入っている（[既知の問題](#固定-ip-がルーターの-dhcp-の払い出し範囲に入っている)）。構築を始める前に、これらの IP、特に VIP の `.110` が使われていないことを確認する。
 
@@ -153,17 +155,62 @@ DHCP で付いた仮の IP が、他のノードの固定 IP と同じになる�
 export TALOSCONFIG=$PWD/_out/talosconfig
 
 talosctl -n 192.168.1.111 bootstrap    # etcd の初期化。クラスタ作成時に 1 回、1 台だけで実行する
+
+# API が起動するまで数分かかる。CNI がないうちは talosctl health が通らないので、API の応答を待つ
+export KUBECONFIG=$PWD/_out/kubeconfig
+until talosctl kubeconfig _out/kubeconfig --force 2>/dev/null &&
+      kubectl get --raw /readyz --request-timeout=3s >/dev/null 2>&1; do sleep 10; done
+kubectl get nodes
+```
+
+この時点では CNI がないため、ノードは `NotReady`、CoreDNS は `Pending` になる。
+
+### 5. Cilium のインストール
+
+```bash
+helm repo add cilium https://helm.cilium.io/
+helm repo update cilium
+helm upgrade --install cilium cilium/cilium --version 1.20.5 \
+  -n kube-system -f cilium/values.yaml --wait --timeout 10m
+cilium status
+
 talosctl -n 192.168.1.111 health \
   --control-plane-nodes 192.168.1.111,192.168.1.112,192.168.1.113 \
   --worker-nodes 192.168.1.121,192.168.1.122 \
   --wait-timeout 15m
-talosctl kubeconfig _out/kubeconfig
-
-export KUBECONFIG=$PWD/_out/kubeconfig
 kubectl get nodes -o wide
 ```
 
+`values.yaml` の主な設定:
+
+- `kubeProxyReplacement: true`: kube-proxy の代わりに Cilium が eBPF で Service を処理する
+- `k8sServiceHost: localhost` / `k8sServicePort: 7445`: kube-proxy がない状態で API server に届くよう、各ノードの KubePrism を使う
+- `securityContext.capabilities`: Talos はカーネルモジュールのロードを許可しないため、デフォルトから `SYS_MODULE` を外している
+- `cgroup.autoMount.enabled: false` / `cgroup.hostRoot: /sys/fs/cgroup`: Talos がマウント済みの cgroupv2 を使う
+
+Cilium の設定を変えるときは、`values.yaml` を編集して同じ `helm upgrade --install` を実行する。
+
+#### Flannel で動いているクラスタからの移行
+
+既存のクラスタに `gen-config.sh` で作り直した設定を `apply-config` しても、Talos はデプロイ済みの Flannel と kube-proxy を削除しない。そのまま Cilium を入れると、CNI が 2 つ動き、kube-proxy の iptables ルールと Cilium の eBPF の Service 処理が重なる。
+
+移行するときは、全ノードを `talosctl reset --graceful=false --reboot --system-labels-to-wipe STATE --system-labels-to-wipe EPHEMERAL` でメンテナンスモードに戻し、手順 3 からやり直す（`_out/secrets.yaml` を残しておけば同じ CA で作り直せる）。
+
 ## 動作確認
+
+### Cilium
+
+```bash
+# kube-proxy の置き換えが有効になっているか
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep KubeProxyReplacement
+
+# Hubble UI をブラウザで開く（http://localhost:12000）
+cilium hubble ui
+```
+
+Service 経由の通信は、nginx の Deployment と Service を作り、ワーカー上の Pod から `curl http://web.<namespace>.svc.cluster.local` で確認できる。コントロールプレーンには `NoSchedule` の taint があるので、テスト用の Pod はワーカーに置く。
+
+2026-11-21 の確認結果: `cilium status` で全コンポーネントが OK（cilium / cilium-envoy 5/5、operator 2/2、hubble-relay・hubble-ui 1/1）。`KubeProxyReplacement: True`。worker01 上の Pod から、worker01 / worker02 の nginx への Service 経由の HTTP が 6 回とも 200 を返した。
 
 ### VIP のフェイルオーバー
 
@@ -175,7 +222,24 @@ talosctl -n <VIP を持っているノード> reboot --wait=false
 while :; do kubectl get --raw /readyz --request-timeout=2s && echo " $(date +%T)"; sleep 2; done
 ```
 
-2026-11-21 の確認結果: ctrl01 を再起動すると、VIP は即座に ctrl03 に移った。約 3 分の監視中、VIP 経由の `/readyz` は一度も失敗しなかった。`talosctl reboot` は graceful なシャットダウンなので VIP がすぐに手放される。Proxmox の `qm stop` などで強制停止した場合は、VIP が移るまでに数十秒かかる見込み（未確認）。
+2026-11-21 の確認結果:
+
+| CNI | 再起動したノード | VIP の移動先 | VIP 経由の `/readyz`（約 3 分監視） |
+|---|---|---|---|
+| Flannel + kube-proxy | ctrl01 | 即座に ctrl03 | 失敗なし |
+| Cilium（kube-proxy 置き換え） | ctrl03 | 即座に ctrl01 | 失敗なし |
+
+`talosctl reboot` は graceful なシャットダウンなので VIP がすぐに手放される。Proxmox の `qm stop` などで強制停止した場合は、VIP が移るまでに数十秒かかる見込み（未確認）。
+
+Cilium の構成で再起動したとき、cilium-operator の Pod がシャットダウン中の ctrl03 に何度もスケジュールされ、`NodeShutdown` で拒否された Pod が 74 個残った（[既知の問題](#ノードの再起動で-cilium-operator-の失敗-pod-が大量に残る)）。
+
+計画的に再起動するときは、先に drain しておくと、この問題を避けられる見込み（未確認）。
+
+```bash
+kubectl drain <ノード名> --ignore-daemonsets --delete-emptydir-data
+talosctl -n <IP> reboot
+kubectl uncordon <ノード名>
+```
 
 ## 既知の問題
 
@@ -184,3 +248,15 @@ while :; do kubectl get --raw /readyz --request-timeout=2s && echo " $(date +%T)
 構築時、ctrl03 に DHCP で `192.168.1.112`（ctrl02 の固定 IP）が割り当てられた。`192.168.1.110`〜`.122` はルーターの DHCP の払い出し範囲に含まれている。PoC なのでこのまま使っているが、ルーターが他の機器にこれらの IP を払い出すと、ノードや VIP と IP がぶつかる。
 
 特定のノードや VIP にときどき届かなくなったら、まず IP の衝突を疑う。恒久的には、ルーターの DHCP の払い出し範囲から `192.168.1.100`〜`.149` を外す。
+
+### ノードの再起動で cilium-operator の失敗 Pod が大量に残る
+
+cilium-operator はすべての taint を許容し、2 つのレプリカが別のノードに載るよう anti-affinity が設定されている。`talosctl reboot` はノードを cordon せずに止めるので、スケジューラはシャットダウン中のノードを候補から外さない。その結果、operator の Pod がそのノードに何度もスケジュールされ、kubelet に `NodeShutdown` で拒否された Pod が残る。
+
+operator 自体は残りのレプリカで動き続け、再起動後にそのノードでも起動し直すので、クラスタの動作には影響しない。`cilium status` の Operator 欄に errors が出るだけ。失敗した Pod は次のように削除する。
+
+```bash
+kubectl delete pods -A --field-selector=status.phase=Failed
+```
+
+再起動する前に drain しておけば避けられる見込み（未確認）。

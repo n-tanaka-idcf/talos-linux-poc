@@ -1,0 +1,8 @@
+# Cilium を helm で入れるため、Flannel と kube-proxy を無効にする
+apiVersion: v1alpha1
+kind: KubeFlannelCNIConfig
+$patch: delete
+---
+apiVersion: v1alpha1
+kind: KubeProxyConfig
+enabled: false
