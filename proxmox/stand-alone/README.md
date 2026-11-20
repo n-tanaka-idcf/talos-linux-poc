@@ -7,7 +7,7 @@ Proxmox VE の VM 1 台で Talos Linux のコントロールプレーンを動�
 | 項目 | 値 |
 |---|---|
 | Proxmox ホスト | `192.168.1.101`（ノード名 `pve`） |
-| VM | VMID `100` / `talos-linux-ctrl01` / 4GB RAM / 50GB ディスク（virtio, `/dev/sda`） |
+| VM | VMID `100` / `talos-linux-ctrl01` / 4GB RAM / 50GB ディスク（SCSI・VirtIO SCSI コントローラー, ゲストからは `/dev/sda`） |
 | NIC | `net0: virtio, bridge=vmbr0`（ゲスト側 `ens18`, MAC `bc:24:11:71:32:0c`） |
 | IP | `192.168.1.111/24`、GW / DNS `192.168.1.1` |
 | クラスタ名 | `talos-poc` |
@@ -29,13 +29,16 @@ _out/             # 生成物（gitignore 対象・秘密鍵を含む）
 
 ## 構築手順
 
-コマンドはこのディレクトリで実行する。
+コマンドはこのディレクトリで実行する。`talosctl` は v1.14.x を使う。生成される設定の形式、インストーラーのイメージ、Kubernetes のバージョンは手元の `talosctl` のバージョンで決まるため、別のバージョンだと上の表とは違う構成になる。
 
 ### 1. VM の作成と起動
 
 1. [Image Factory](https://factory.talos.dev/) から metal 用 ISO を取得して Proxmox に置く
-2. VM を作成して ISO から起動する（NIC のファイアウォールは無効でよい）
-3. コンソールに `maintenance mode` と表示されたら、**F3**（Network Config）で IP を `192.168.1.111/24` にする
+2. VM を作成する
+   - ディスクのバスは **SCSI**（コントローラーは VirtIO SCSI）にする。VirtIO Block にするとゲストからは `/dev/vda` に見え、`--install-disk /dev/sda` へのインストールが失敗する
+   - Options → Boot Order で **ディスク（`scsi0`）を CD（`ide2`）より上**にする。ディスクが空のうちは ISO から起動し、インストール後の再起動ではディスクから起動する
+   - NIC のファイアウォールは無効でよい
+3. ISO から起動し、コンソールに `maintenance mode` と表示されたら、**F3**（Network Config）で IP を `192.168.1.111/24` にする
 
 疎通を確認する。
 
@@ -46,6 +49,7 @@ talosctl -n 192.168.1.111 -e 192.168.1.111 get disks --insecure
 ### 2. 設定ファイルの生成
 
 ```bash
+mkdir -p _out
 talosctl gen secrets -o _out/secrets.yaml
 
 talosctl gen config talos-poc https://192.168.1.111:6443 \
@@ -70,7 +74,7 @@ talosctl apply-config --insecure -n 192.168.1.111 -e 192.168.1.111 -f _out/contr
 
 インストーラーのイメージをダウンロードして `/dev/sda` にインストールし、再起動する。インストール中は `talosctl --talosconfig _out/talosconfig logs machined` で進み具合を確認できる。
 
-インストールが終わったら、Proxmox で CD/DVD を「Do not use any media」にして ISO を外す。
+インストール後の再起動でメンテナンスモードの画面に戻った場合は、ISO から起動している。ブート順を見直すか、CD/DVD を「Do not use any media」にしてから VM をリセットする。インストールが終わったら、ISO は外しておく。
 
 ### 4. bootstrap と kubeconfig の取得
 

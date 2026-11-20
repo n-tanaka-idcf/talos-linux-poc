@@ -1,7 +1,8 @@
 # talosctl gen secrets / gen config の生成物（秘密鍵を含む）
 _out/
+
+# _out/ の外に誤って出力した場合の保険。
+# controlplane.yaml / worker.yaml はパッチのファイル名と衝突しうるので含めない
 secrets.yaml
 talosconfig
 kubeconfig
-controlplane.yaml
-worker.yaml
