@@ -1,0 +1,24 @@
+apiVersion: v1alpha1
+kind: HostnameConfig
+auto: off
+hostname: talos-linux-ctrl01
+---
+apiVersion: v1alpha1
+kind: LinkConfig
+name: ens18
+addresses:
+  - address: 192.168.1.111/24
+routes:
+  - gateway: 192.168.1.1
+---
+apiVersion: v1alpha1
+kind: ResolverConfig
+nameservers:
+  - address: 192.168.1.1
+---
+# CP1台構成のため、コントロールプレーンにもPodをスケジュールする
+apiVersion: v1alpha1
+kind: KubeNodeConfig
+taints:
+  node-role.kubernetes.io/control-plane:
+    $patch: delete
