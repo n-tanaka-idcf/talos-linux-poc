@@ -72,7 +72,9 @@ VM からホームネットワークの機器には届かないようにして�
 | VM → そのほかのプライベートアドレス・CGNAT のアドレス（ルーター、作業端末など） | 落とす |
 | VM → Proxmox ホスト | DHCP と ICMP だけ通す（Web UI や SSH には入れない） |
 | VM から、送信元が `10.10.10.0/24` 以外の通信 | 落とす（送信元の偽装対策。ファイアウォールではなく `rp_filter` で止める） |
-| 作業端末 → VM | 通す |
+| ホームネットワーク → VM | 通す |
+
+ルーターに静的ルートを入れているので、VM に届くのは作業端末だけではない。ホームネットワークのどの機器からも、Kubernetes API（6443）、Talos API（50000）、NodePort などに届く。
 
 ルーターの WAN 側のグローバル IP 宛ては止めていない。ルーターによっては、そこから管理画面に届く。WAN 側の IP は変わりうるので、ルールには入れていない。
 
@@ -128,6 +130,8 @@ sysctl -p /etc/sysctl.d/99-ip-forward.conf
 
 #### ファイアウォール
 
+ここでは、入れたばかりの Proxmox を前提に、`host.fw` と `cluster.fw` を丸ごと書き換える。すでにファイアウォールのルールがあるホストでは、上書きせずに、既存のファイルに追記する。
+
 ホストのルールを書く。
 
 ```bash
@@ -164,6 +168,7 @@ sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.talosnet.rp_filter   # 0 と 1 
 
 - `rp_filter` の実際の値は、`all` とインターフェースごとの値の大きいほうになる。`/usr/lib/sysctl.d/pve-firewall.conf` が `all` を `2`（緩いモード）にしているので、`all` を `0` にしないと `talosnet` を厳密にできない。ほかのインターフェースは個別の値（`2`）のままなので、動きは変わらない
 - sysctl の設定ファイルはファイル名の順に読まれ、あとのファイルが勝つ。`99-` で始めると `pve-firewall.conf` より先に読まれ、全体が読み直されたときに `all` が `2` に戻る（2026-11-22 に起きた）
+- 起動時に sysctl が読まれる時点では、`talosnet` はまだない。`talosnet` の値は、SDN がインターフェースを作ったときに udev が `systemd-sysctl --prefix=/net/ipv4/conf/talosnet` を実行して当てる（`/usr/lib/udev/rules.d/99-systemd.rules`）。Proxmox を再起動したあとは、上の `sysctl` で `0` と `1` になっていることを確かめる（2026-11-22 時点では、再起動しての確認はしていない）
 
 ファイアウォールを有効にする。締め出されたときのために、直前に 10 分で無効に戻すタイマーを仕掛けておく。
 
@@ -177,10 +182,12 @@ enable: 1
 EOF
 ```
 
-作業端末から SSH と Web UI に入れることを確かめたら、タイマーを止める。
+作業端末から SSH と Web UI に入れることを確かめたら、タイマーを止める。止め忘れると、10 分後にファイアウォールが何の表示もなく無効になる。
 
 ```bash
 systemctl stop fw-rollback.timer
+systemctl list-timers --all | grep fw-rollback   # 何も出ないこと
+grep enable /etc/pve/firewall/cluster.fw          # enable: 1 のままであること
 ```
 
 - ファイアウォールを有効にすると、Proxmox ホストへの通信は管理用のもの（SSH、Web UI など）だけが通る。管理用の通信を受け付ける範囲は、ホストの IP から自動で検出される（`pve-firewall localnet` で `192.168.1.0/24` になっていることを確認しておく）
@@ -204,6 +211,8 @@ systemctl stop fw-rollback.timer
 ```bash
 sudo route -n add -net 10.10.10.0/24 192.168.1.101
 ```
+
+macOS の `route add` で入れたルートは、再起動やネットワークのつなぎ直しで消える。そのたびに入れ直す。
 
 ### 2. VM の作成
 
@@ -232,6 +241,8 @@ done
 pvesh get /cluster/sdn/ipams/pve/status --output-format json |
   python3 -c 'import json,sys; [print(e.get("vmid","-"), e.get("mac","-"), e["ip"]) for e in json.load(sys.stdin)]'
 ```
+
+IPAM に載るのは DHCP の仮の IP だけで、手順 4 で固定 IP に切り替えたあとも、仮の IP（`.100`〜）が表示されたままになる。固定 IP（`.10`〜`.22`）は IPAM に登録していない。DHCP の払い出し範囲の外なのでぶつかることはないが、IPAM の一覧はノードの実際の IP を表していない。
 
 ### 3. 設定ファイルの生成
 
@@ -337,8 +348,13 @@ VIP を持っているノードを確認し、drain してから再起動する�
 talosctl -n 10.10.10.11,10.10.10.12,10.10.10.13 get addresses | grep 10.10.10.10
 kubectl drain <ノード名> --ignore-daemonsets --delete-emptydir-data
 talosctl -n <VIP を持っているノード> reboot --wait=false
-while :; do kubectl get --raw /readyz --request-timeout=2s && echo " $(date +%T)"; sleep 2; done
-kubectl uncordon <ノード名>   # ノードが Ready に戻ったら
+while :; do kubectl get --raw /readyz --request-timeout=2s && echo " $(date +%T)"; sleep 2; done   # Ctrl-C で止める
+```
+
+ノードが Ready に戻ったら、uncordon する。
+
+```bash
+kubectl uncordon <ノード名>
 ```
 
 確認結果:
