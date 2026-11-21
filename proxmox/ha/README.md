@@ -125,15 +125,15 @@ macOS の `arp` は MAC を小文字で、各オクテットの先頭の 0 を�
 # 手元で DHCP の払い出し範囲に ping を打って ARP テーブルを埋める
 for i in $(seq 128 249); do ping -c1 -t1 192.168.1.$i >/dev/null 2>&1 & done; wait
 
-# Proxmox で確認した MAC から仮の IP を引く
+# Proxmox で確認した MAC から仮の IP を引く（DHCP の払い出し範囲の IP だけを出す）
 mac2ip() {
   local m=$(echo "$1" | tr 'A-Z' 'a-z' | sed -E 's/(^|:)0([0-9a-f])/\1\2/g')
-  arp -an | grep " at $m " | grep -oE '\([0-9.]+\)' | tr -d '()'
+  arp -an | grep " at $m " | grep -oE '\([0-9.]+\)' | tr -d '()' | awk -F. '$4 >= 128 && $4 <= 249'
 }
 mac2ip BC:24:11:02:2A:03
 ```
 
-ARP テーブルには古いエントリが残るため、1 つの MAC に複数の IP が出ることがある。そのときは `talosctl -n <IP> -e <IP> get disks --insecure` に応答する IP がメンテナンスモードのもの。
+作り直しのときは、ARP テーブルに固定 IP（`.111` など）の古いエントリが残っている。`mac2ip` は払い出し範囲で絞っているので、それは出てこない。それでも以前に DHCP で付いた IP が残っていると、1 つの MAC に複数の IP が出ることがある。そのときは `talosctl -n <IP> -e <IP> get disks --insecure` に応答する IP がメンテナンスモードのもの。
 
 ### 2. 設定ファイルの生成
 
