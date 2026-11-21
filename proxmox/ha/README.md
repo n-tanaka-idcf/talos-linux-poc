@@ -66,12 +66,15 @@ VM からホームネットワークの機器には届かないようにして�
 
 | 通信 | 扱い |
 |---|---|
-| VM 同士 | 通す（同じブリッジ内なのでファイアウォールを通らない） |
+| VM 同士 | 通す |
 | VM → インターネット | 通す |
 | VM → DNS（`192.168.1.1:53`） | 通す |
-| VM → そのほかのプライベートアドレス（ルーター、作業端末など） | 落とす |
+| VM → そのほかのプライベートアドレス・CGNAT のアドレス（ルーター、作業端末など） | 落とす |
 | VM → Proxmox ホスト | DHCP と ICMP だけ通す（Web UI や SSH には入れない） |
+| VM から、送信元が `10.10.10.0/24` 以外の通信 | 落とす（送信元の偽装対策。ファイアウォールではなく `rp_filter` で止める） |
 | 作業端末 → VM | 通す |
+
+ルーターの WAN 側のグローバル IP 宛ては止めていない。ルーターによっては、そこから管理画面に届く。WAN 側の IP は変わりうるので、ルールには入れていない。
 
 ## ファイル
 
@@ -125,12 +128,7 @@ sysctl -p /etc/sysctl.d/99-ip-forward.conf
 
 #### ファイアウォール
 
-先に、締め出されたときに 10 分で無効に戻すタイマーを仕掛けておく。作業端末から SSH と Web UI に入れることを確かめたら止める。
-
-```bash
-systemd-run --on-active=600 --unit=fw-rollback \
-  /bin/sh -c 'sed -i "s/^enable: 1/enable: 0/" /etc/pve/firewall/cluster.fw'
-```
+ホストのルールを書く。
 
 ```bash
 cat > /etc/pve/nodes/pve/host.fw <<'EOF'
@@ -140,13 +138,38 @@ nftables: 1
 [RULES]
 IN ACCEPT -i talosnet -p udp -dport 67 # Talos VM: DHCP (SDN dnsmasq)
 IN ACCEPT -i talosnet -p icmp # Talos VM: ping to gateway
+FORWARD ACCEPT -source 10.10.10.0/24 -dest 10.10.10.0/24 # Talos VM: VM to VM
 FORWARD ACCEPT -source 10.10.10.0/24 -dest 192.168.1.1 -p udp -dport 53 # Talos VM: DNS
 FORWARD ACCEPT -source 10.10.10.0/24 -dest 192.168.1.1 -p tcp -dport 53 # Talos VM: DNS
 FORWARD DROP -source 10.10.10.0/24 -dest 192.168.0.0/16 # Talos VM: no access to home network
 FORWARD DROP -source 10.10.10.0/24 -dest 172.16.0.0/12
 FORWARD DROP -source 10.10.10.0/24 -dest 10.0.0.0/8
+FORWARD DROP -source 10.10.10.0/24 -dest 100.64.0.0/10
 FORWARD DROP -source 10.10.10.0/24 -dest 169.254.0.0/16
 EOF
+```
+
+FORWARD のルールは送信元アドレスで判定するので、送信元を偽った通信（たとえば Pod の `10.244.0.0/16` のアドレスのまま出た通信）はすり抜ける（2026-11-22 に確認）。これはカーネルの逆経路フィルタ（`rp_filter`）で止める。`talosnet` から届いた通信のうち、送信元へ返す経路が `talosnet` を通らないもの（送信元が `10.10.10.0/24` 以外）を落とす。
+
+```bash
+cat > /etc/sysctl.d/zz-talosnet-rp-filter.conf <<'EOF'
+# Talos VM の送信元の偽装を止める（talosnet だけ厳密な逆経路フィルタにする）
+# 実際の値は all とインターフェースごとの値の大きいほう。pve-firewall.conf が all を 2 にするので 0 に戻す（このファイルは pve-firewall.conf より後に読ませるため zz- で始める）
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.talosnet.rp_filter = 1
+EOF
+/usr/lib/systemd/systemd-sysctl
+sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.talosnet.rp_filter   # 0 と 1 になっていること
+```
+
+- `rp_filter` の実際の値は、`all` とインターフェースごとの値の大きいほうになる。`/usr/lib/sysctl.d/pve-firewall.conf` が `all` を `2`（緩いモード）にしているので、`all` を `0` にしないと `talosnet` を厳密にできない。ほかのインターフェースは個別の値（`2`）のままなので、動きは変わらない
+- sysctl の設定ファイルはファイル名の順に読まれ、あとのファイルが勝つ。`99-` で始めると `pve-firewall.conf` より先に読まれ、全体が読み直されたときに `all` が `2` に戻る（2026-11-22 に起きた）
+
+ファイアウォールを有効にする。締め出されたときのために、直前に 10 分で無効に戻すタイマーを仕掛けておく。
+
+```bash
+systemd-run --on-active=600 --unit=fw-rollback \
+  /bin/sh -c 'printf "[OPTIONS]\nenable: 0\n" > /etc/pve/firewall/cluster.fw'
 
 cat > /etc/pve/firewall/cluster.fw <<'EOF'
 [OPTIONS]
@@ -154,14 +177,16 @@ enable: 1
 EOF
 ```
 
+作業端末から SSH と Web UI に入れることを確かめたら、タイマーを止める。
+
 ```bash
-# 作業端末から SSH と Web UI に入れることを確かめてから
 systemctl stop fw-rollback.timer
 ```
 
 - ファイアウォールを有効にすると、Proxmox ホストへの通信は管理用のもの（SSH、Web UI など）だけが通る。管理用の通信を受け付ける範囲は、ホストの IP から自動で検出される（`pve-firewall localnet` で `192.168.1.0/24` になっていることを確認しておく）
 - 制限は VNet のファイアウォール（`/etc/pve/sdn/firewall/talosnet.fw`）ではなく、ホストの FORWARD ルールに書く。VNet のルールは同じブリッジ内の通信にしかかからず、Proxmox がルーティングしてホームネットワークに出す通信は止められなかった
-- SNAT は FORWARD の判定より後に行われるので、ルールでは送信元を `10.10.10.0/24` として判定できる
+- FORWARD のルールには、受信したインターフェース（`-i talosnet`）を書けない。書くと proxmox-firewall が `cannot define interfaces for forward direction` とログに出して、そのルールを読み飛ばす。ルールの中でアドレスを否定する書き方（`!`）もない。そのため、送信元の偽装は上の `rp_filter` で止めている
+- VM 同士の通信は、同じブリッジ内で済むので今は FORWARD を通らない。ブリッジの通信もファイアウォールにかける設定（`br_netfilter`）になったときに `10.0.0.0/8` の DROP で止まらないよう、VM 同士を通すルールを先に書いている
 - ファイアウォールを有効にしたあとは、`pve-firewall status` が `pending changes` と表示する。旧来の iptables 版の表示で、iptables 側にはルールがないので無視してよい
 
 #### ルーターの静的ルート
@@ -172,7 +197,13 @@ systemctl stop fw-rollback.timer
 |---|---|---|
 | `10.10.10.0` | `255.255.255.0` | `192.168.1.101` |
 
-行き（作業端末 → ルーター → Proxmox → VM）と帰り（VM → Proxmox → 作業端末）で経路が変わるが、TCP も問題なく通ることを確認済み。ルーターに入れられない場合は、作業端末に `sudo route -n add -net 10.10.10.0/24 192.168.1.101` で入れる。
+行き（作業端末 → ルーター → Proxmox → VM）と帰り（VM → Proxmox → 作業端末）で経路が変わる。今のルーターでは TCP も問題なく通ったが、ルーターのファイアウォールが通信の状態を追っていると、帰りが見えないために TCP を落とし、`kubectl` や `talosctl` が途中で止まることがある。
+
+ルーターに入れられない場合や、TCP が止まる場合は、作業端末に直接ルートを入れる（行きも帰りもルーターを通らなくなる）。
+
+```bash
+sudo route -n add -net 10.10.10.0/24 192.168.1.101
+```
 
 ### 2. VM の作成
 
@@ -282,12 +313,13 @@ Service 経由の通信は、nginx の Deployment と Service を作り、ワー
 
 2026-11-22 の確認結果（VM 用ネットワークに移したあと）: `cilium status` で全コンポーネントが OK（cilium / cilium-envoy 5/5、operator 2/2、hubble-relay・hubble-ui 1/1）。`KubeProxyReplacement: True`。worker01 上の Pod から、worker01 / worker02 の nginx への Service 経由の HTTP が 6 回とも 200 を返した。
 
-### VM 用ネットワークのファイアウォール
+### Pod から外への通信
 
 ワーカー上の Pod から、インターネットと DNS には届き、ホームネットワークには届かないことを確認する。
 
 ```bash
 kubectl run client --image=curlimages/curl:8.17.0 --restart=Never --command -- sleep 3600
+kubectl wait --for=condition=Ready pod/client --timeout=3m
 kubectl exec client -- curl -s -m5 -o /dev/null -w '%{http_code}\n' https://factory.talos.dev/   # 200
 kubectl exec client -- nslookup factory.talos.dev                                               # 解決できる
 kubectl exec client -- curl -s -m5 http://192.168.1.1/                                          # タイムアウト
