@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CLUSTER_NAME=talos-ha
-ENDPOINT=https://192.168.1.110:6443
+ENDPOINT=https://10.10.10.10:6443
 
 CONTROLPLANES=()
 for f in nodes/ctrl*.yaml; do CONTROLPLANES+=("$(basename "$f" .yaml)"); done
