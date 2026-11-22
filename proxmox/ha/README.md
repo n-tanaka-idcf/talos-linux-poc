@@ -168,7 +168,7 @@ sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.talosnet.rp_filter   # 0 と 1 
 
 - `rp_filter` の実際の値は、`all` とインターフェースごとの値の大きいほうになる。`/usr/lib/sysctl.d/pve-firewall.conf` が `all` を `2`（緩いモード）にしているので、`all` を `0` にしないと `talosnet` を厳密にできない。ほかのインターフェースは個別の値（`2`）のままなので、動きは変わらない
 - sysctl の設定ファイルはファイル名の順に読まれ、あとのファイルが勝つ。`99-` で始めると `pve-firewall.conf` より先に読まれ、全体が読み直されたときに `all` が `2` に戻る（2026-11-22 に起きた）
-- 起動時に sysctl が読まれる時点では、`talosnet` はまだない。`talosnet` の値は、SDN がインターフェースを作ったときに udev が `systemd-sysctl --prefix=/net/ipv4/conf/talosnet` を実行して当てる（`/usr/lib/udev/rules.d/99-systemd.rules`）。Proxmox を再起動したあとは、上の `sysctl` で `0` と `1` になっていることを確かめる（2026-11-22 時点では、再起動しての確認はしていない）
+- 起動時に sysctl が読まれる時点では、`talosnet` はまだない。`talosnet` の値は、SDN がインターフェースを作ったときに udev が `systemd-sysctl --prefix=/net/ipv4/conf/talosnet` を実行して当てる（`/usr/lib/udev/rules.d/99-systemd.rules`）。Proxmox を再起動したあとは、上の `sysctl` で `0` と `1` になっていることを確かめる（2026-11-22 に再起動して確認済み。[Proxmox の再起動](#proxmox-の再起動) を参照）
 
 ファイアウォールを有効にする。締め出されたときのために、直前に 10 分で無効に戻すタイマーを仕掛けておく。
 
@@ -366,6 +366,21 @@ kubectl uncordon <ノード名>
 | 2026-11-22 | 10.10.10.0/24 | Cilium | ctrl01 | あり | 即座に ctrl02 | 失敗なし（87 回） | 0 個 |
 
 `talosctl reboot` は graceful なシャットダウンなので VIP がすぐに手放される。Proxmox の `qm stop` などで強制停止した場合は、VIP が移るまでに数十秒かかる見込み（未確認）。
+
+### Proxmox の再起動
+
+Proxmox ホストを再起動すると、VM は正常にシャットダウンされる。VM には自動起動（`onboot`）を設定していないので、起動後に手で起動する。
+
+```bash
+for id in 100 101 102 111 112; do qm start $id; done
+```
+
+2026-11-22 の確認結果:
+
+- `rp_filter` は `all=0` / `talosnet=1`、`ip_forward=1` のまま。ファイアウォールのルール、SNAT、`dnsmasq@talos` も元どおりに動いた
+- VM の代わりの network namespace から送信元を偽った通信を送ると、ルーター宛てもインターネット宛ても止まった
+- VM を起動すると、5 台とも Ready になり、etcd のメンバーは 3 台そろい、VIP も動いた
+- シャットダウンで止められた cilium-operator の Pod が `Error` で 1 つ残り、`cilium status` の Operator 欄に errors が出た。`kubectl delete pods -A --field-selector=status.phase=Failed` で消すと OK に戻った
 
 ## 既知の問題
 
