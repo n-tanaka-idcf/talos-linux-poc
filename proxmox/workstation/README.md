@@ -72,6 +72,9 @@ ssh root@192.168.1.101 './create-vm.sh <公開鍵>.pub && rm create-vm.sh <公�
 ```
 
 - Ubuntu のクラウドイメージ（`.img`）の中身は qcow2。`local` ストレージの `import` は拡張子でファイルの形式を判断し、`.img` は受け付けない（`unable to parse directory volume name`）ので、`.qcow2` の名前で保存している
+- イメージは Ubuntu の `SHA256SUMS` で確かめてから取り込む。取り込みが終わったら（失敗したときも）、`/var/lib/vz/import/` から消す
+- `qm create` のあとで失敗したら、作りかけの VM を `qm destroy --purge` で消す。残ると、VMID がすでにあるという確認で再実行できなくなる
+- `current` のイメージを使うので、作るたびに中身が新しくなる
 - cloud-init で渡すのは、ユーザー、公開鍵、IP だけ。追加のルートやパッケージを cloud-init で渡すにはスニペットのストレージが要るので、手順 2 で入れる
 
 cloud-init が終わると、Mac から入れる（起動から 10 秒ほど）。
@@ -87,7 +90,10 @@ scp setup.sh ubuntu@192.168.1.120:/tmp/
 ssh ubuntu@192.168.1.120 'sudo /tmp/setup.sh'
 ```
 
-`qemu-guest-agent` は udev から起動される unit なので、`systemctl enable` はできない（警告が出る）。`setup.sh` では `start` だけしている。
+- `qemu-guest-agent` は udev から起動される unit なので、`systemctl enable` はできない（警告が出る）。`setup.sh` では `start` だけしている
+- tofu は `apt-mark hold` で固定している。`apt-get install -y` は hold されたパッケージを変えられない（`Held packages were changed and -y was used without --allow-change-held-packages`）ので、`--allow-change-held-packages` を付けて入れる
+- ルートの付け先は、デフォルトルートのインターフェース（cloud-init の設定では `eth0`）にする
+- `netplan apply` でネットワークが再設定されるので、名前解決できるようになるまで待ってからダウンロードを始める
 
 ### 3. Proxmox に入る SSH 鍵
 
@@ -121,7 +127,8 @@ pvesh create /cluster/backup --schedule "sun 03:00" --vmid 200 --storage local \
   --comment "iac-workstation weekly"
 ```
 
-バックアップは Proxmox の中（`/var/lib/vz/dump/`）に置くので、Proxmox の故障には耐えない。
+- バックアップは Proxmox の中（`/var/lib/vz/dump/`）に置くので、Proxmox の故障には耐えない
+- バックアップは VM のディスクを丸ごと、暗号化せずに保存する。Talos クラスタの `secrets.yaml`、talosconfig、kubeconfig、OpenTofu の state、Proxmox の `root` に入れる SSH 鍵も含まれる。Proxmox の `root` で読めるので、バックアップを Proxmox の外に持ち出すときは暗号化する
 
 ## 動作確認
 
@@ -140,4 +147,6 @@ timeout 4 bash -c '</dev/tcp/10.10.10.10/6443' && echo ok    # Kubernetes API（
 - VM 用ネットワークに置いた network namespace から、この VM の SSH（22）には届かなかった
 - `_out/` をコピーしたあと、VM から `kubectl get nodes`（5 台とも Ready）、`talosctl health`、`cilium status` が通った
 - `setup.sh` を 2 回続けて実行し、2 回目も正常に終わった
+- tofu を 1.13.8 に下げて hold した状態で `setup.sh` を実行すると、1.13.9 に上がり、hold も残った（`--allow-change-held-packages` がないと、apt がエラーで止まることも確認した）
+- VMID を 299 に変えた `create-vm.sh` に存在しない公開鍵を渡すと、イメージのチェックサムの確認と VM の作成のあと `qm set` で失敗し、VM 299 とイメージが消えた
 - `vzdump 200 --storage local --mode snapshot --compress zstd` を手で実行し、48 秒で終わった（圧縮後 2.0GB）。ゲストエージェント経由で `fs-freeze` / `fs-thaw` が行われた
