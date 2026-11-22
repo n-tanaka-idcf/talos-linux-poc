@@ -230,7 +230,7 @@ for spec in "100 talos-linux-ctrl01 20" "101 talos-linux-ctrl02 20" "102 talos-l
     --net0 virtio,bridge=talosnet \
     --scsihw virtio-scsi-single --scsi0 local-lvm:$3,iothread=1 \
     --ide2 local:iso/talos-linux-1.14.6.iso,media=cdrom \
-    --boot 'order=scsi0;ide2;net0' --ostype l26
+    --boot 'order=scsi0;ide2;net0' --ostype l26 --onboot 1
   qm start $1
 done
 ```
@@ -369,17 +369,17 @@ kubectl uncordon <ノード名>
 
 ### Proxmox の再起動
 
-Proxmox ホストを再起動すると、VM は正常にシャットダウンされる。VM には自動起動（`onboot`）を設定していないので、起動後に手で起動する。
+Proxmox ホストを再起動すると、VM は正常にシャットダウンされ、起動後は自動起動（`--onboot 1`）で立ち上がる。自動起動を設定していない VM は、次のように設定する。
 
 ```bash
-for id in 100 101 102 111 112; do qm start $id; done
+for id in 100 101 102 111 112; do qm set $id --onboot 1; done
 ```
 
 2026-11-22 の確認結果:
 
 - `rp_filter` は `all=0` / `talosnet=1`、`ip_forward=1` のまま。ファイアウォールのルール、SNAT、`dnsmasq@talos` も元どおりに動いた
 - VM の代わりの network namespace から送信元を偽った通信を送ると、ルーター宛てもインターネット宛ても止まった
-- VM を起動すると、5 台とも Ready になり、etcd のメンバーは 3 台そろい、VIP も動いた
+- このときは自動起動を設定していなかったので、VM を手で起動した。5 台とも Ready になり、etcd のメンバーは 3 台そろい、VIP も動いた
 - シャットダウンで止められた cilium-operator の Pod が `Error` で 1 つ残り、`cilium status` の Operator 欄に errors が出た。`kubectl delete pods -A --field-selector=status.phase=Failed` で消すと OK に戻った
 
 ## 既知の問題
